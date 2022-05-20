@@ -106,19 +106,20 @@ char *ff_hr_str_buf(char *buf, size_t size, HRESULT hr)
 // If fill_data!=NULL, initialize the buffer and set the length. (This is a
 // subtle but important difference: some decoders want CurrentLength==0 on
 // provided output buffers.)
-IMFSample *ff_create_memory_sample(void *fill_data, size_t size, size_t align)
+IMFSample *ff_create_memory_sample(const MFSymbols *symbols, void *fill_data,
+                                   size_t size, size_t align)
 {
     HRESULT hr;
     IMFSample *sample;
     IMFMediaBuffer *buffer;
 
-    hr = MFCreateSample(&sample);
+    hr = symbols->MFCreateSample(&sample);
     if (FAILED(hr))
         return NULL;
 
     align = FFMAX(align, 16); // 16 is "recommended", even if not required
 
-    hr = MFCreateAlignedMemoryBuffer(size, align - 1, &buffer);
+    hr = symbols->MFCreateAlignedMemoryBuffer(size, align - 1, &buffer);
     if (FAILED(hr))
         return NULL;
 
@@ -548,7 +549,7 @@ const CLSID *ff_codec_to_mf_subtype(enum AVCodecID codec)
     }
 }
 
-static int init_com_mf(void *log)
+static int init_com_mf(const MFSymbols *symbols, void *log)
 {
     HRESULT hr;
 
@@ -561,7 +562,7 @@ static int init_com_mf(void *log)
         return AVERROR(ENOSYS);
     }
 
-    hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    hr = symbols->MFStartup(MF_VERSION, MFSTARTUP_FULL);
     if (FAILED(hr)) {
         av_log(log, AV_LOG_ERROR, "could not initialize MediaFoundation\n");
         CoUninitialize();
@@ -571,15 +572,16 @@ static int init_com_mf(void *log)
     return 0;
 }
 
-static void uninit_com_mf(void)
+static void uninit_com_mf(const MFSymbols *symbols)
 {
-    MFShutdown();
+    symbols->MFShutdown();
     CoUninitialize();
 }
 
 // Find and create a IMFTransform with the given input/output types. When done,
 // you should use ff_free_mf() to destroy it, which will also uninit COM.
-int ff_instantiate_mf(void *log,
+int ff_instantiate_mf(const MFSymbols *symbols,
+                      void *log,
                       GUID category,
                       MFT_REGISTER_TYPE_INFO *in_type,
                       MFT_REGISTER_TYPE_INFO *out_type,
@@ -594,7 +596,7 @@ int ff_instantiate_mf(void *log,
     IMFActivate *winner = 0;
     UINT32 flags;
 
-    ret = init_com_mf(log);
+    ret = init_com_mf(symbols, log);
     if (ret < 0)
         return ret;
 
@@ -667,14 +669,14 @@ int ff_instantiate_mf(void *log,
     return 0;
 
 error_uninit_mf:
-    uninit_com_mf();
+    uninit_com_mf(symbols);
     return AVERROR(ENOSYS);
 }
 
-void ff_free_mf(IMFTransform **mft)
+void ff_free_mf(const MFSymbols *symbols, IMFTransform **mft)
 {
     if (*mft)
         IMFTransform_Release(*mft);
     *mft = NULL;
-    uninit_com_mf();
+    uninit_com_mf(symbols);
 }

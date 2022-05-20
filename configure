@@ -3129,8 +3129,8 @@ wmv3_vaapi_hwaccel_select="vc1_vaapi_hwaccel"
 wmv3_vdpau_hwaccel_select="vc1_vdpau_hwaccel"
 
 # hardware-accelerated codecs
-mediafoundation_deps="mftransform_h MFCreateAlignedMemoryBuffer"
-mediafoundation_extralibs="-lmfplat -lmfuuid -lole32 -lstrmiids"
+mediafoundation_deps="LoadLibrary mftransform_h MFCreateAlignedMemoryBuffer"
+mediafoundation_extralibs="-lole32 -lstrmiids"
 omx_deps="libdl pthreads"
 omx_rpi_select="omx"
 qsv_deps="libmfx"

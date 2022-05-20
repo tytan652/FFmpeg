@@ -29,9 +29,13 @@
 #include "libavutil/time.h"
 #include "codec_internal.h"
 #include "internal.h"
+#include "compat/w32dlfcn.h"
 
 typedef struct MFContext {
     AVClass *av_class;
+    void *library;
+    MFSymbols symbols;
+    
     AVFrame *frame;
     int is_video, is_audio;
     GUID main_subtype;
@@ -292,7 +296,7 @@ static IMFSample *mf_a_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
     bps = av_get_bytes_per_sample(avctx->sample_fmt) * avctx->ch_layout.nb_channels;
     len = frame->nb_samples * bps;
 
-    sample = ff_create_memory_sample(frame->data[0], len, c->in_info.cbAlignment);
+    sample = ff_create_memory_sample(&c->symbols, frame->data[0], len, c->in_info.cbAlignment);
     if (sample)
         IMFSample_SetSampleDuration(sample, mf_to_mf_time(avctx, frame->nb_samples));
     return sample;
@@ -312,7 +316,7 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
     if (size < 0)
         return NULL;
 
-    sample = ff_create_memory_sample(NULL, size, c->in_info.cbAlignment);
+    sample = ff_create_memory_sample(&c->symbols, NULL, size, c->in_info.cbAlignment);
     if (!sample)
         return NULL;
 
@@ -422,7 +426,7 @@ static int mf_receive_sample(AVCodecContext *avctx, IMFSample **out_sample)
         }
 
         if (!c->out_stream_provides_samples) {
-            sample = ff_create_memory_sample(NULL, c->out_info.cbSize, c->out_info.cbAlignment);
+            sample = ff_create_memory_sample(&c->symbols, NULL, c->out_info.cbSize, c->out_info.cbAlignment);
             if (!sample)
                 return AVERROR(ENOMEM);
         }
@@ -777,7 +781,7 @@ static int mf_choose_output_type(AVCodecContext *avctx)
     if (out_type) {
         av_log(avctx, AV_LOG_VERBOSE, "picking output type %d.\n", out_type_index);
     } else {
-        hr = MFCreateMediaType(&out_type);
+        hr = c->symbols.MFCreateMediaType(&out_type);
         if (FAILED(hr)) {
             ret = AVERROR(ENOMEM);
             goto done;
@@ -1005,7 +1009,7 @@ err:
     return res;
 }
 
-static int mf_create(void *log, IMFTransform **mft, const AVCodec *codec, int use_hw)
+static int mf_create(const MFSymbols *symbols, void *log, IMFTransform **mft, const AVCodec *codec, int use_hw)
 {
     int is_audio = codec->type == AVMEDIA_TYPE_AUDIO;
     const CLSID *subtype = ff_codec_to_mf_subtype(codec->id);
@@ -1028,13 +1032,57 @@ static int mf_create(void *log, IMFTransform **mft, const AVCodec *codec, int us
         category = MFT_CATEGORY_VIDEO_ENCODER;
     }
 
-    if ((ret = ff_instantiate_mf(log, category, NULL, &reg, use_hw, mft)) < 0)
+    if ((ret = ff_instantiate_mf(symbols, log, category, NULL, &reg, use_hw, mft)) < 0)
         return ret;
 
     return 0;
 }
 
-static int mf_init(AVCodecContext *avctx)
+static int mf_load_library(AVCodecContext *avctx)
+{
+    MFContext *c = avctx->priv_data;
+
+    c->library = dlopen("MFPlat.DLL", RTLD_NOW | RTLD_LOCAL);
+
+    if (c->library == NULL) {
+        av_log(c, AV_LOG_ERROR, "DLL MFPlat.DLL failed to open\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    c->symbols.MFCreateSample = dlsym(c->library, "MFCreateSample");
+    if (c->symbols.MFCreateSample == NULL) {
+        av_log(c, AV_LOG_ERROR, "DLL MFPlat.DLL failed to find function MFCreateSample\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    c->symbols.MFCreateAlignedMemoryBuffer = dlsym(c->library, "MFCreateAlignedMemoryBuffer");
+    if (c->symbols.MFCreateAlignedMemoryBuffer == NULL) {
+        av_log(c, AV_LOG_ERROR, "DLL MFPlat.DLL failed to find function MFCreateAlignedMemoryBuffer\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    c->symbols.MFStartup = dlsym(c->library, "MFStartup");
+    if (c->symbols.MFStartup == NULL) {
+        av_log(c, AV_LOG_ERROR, "DLL MFPlat.DLL failed to find function MFStartup\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    c->symbols.MFShutdown = dlsym(c->library, "MFShutdown");
+    if (c->symbols.MFShutdown == NULL) {
+        av_log(c, AV_LOG_ERROR, "DLL MFPlat.DLL failed to find function MFShutdown\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    c->symbols.MFCreateMediaType = dlsym(c->library, "MFCreateMediaType");
+    if (c->symbols.MFCreateMediaType == NULL) {
+        av_log(c, AV_LOG_ERROR, "DLL MFPlat.DLL failed to find function MFCreateMediaType\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    return 0;
+};
+
+static int mf_init_encoder(AVCodecContext *avctx)
 {
     MFContext *c = avctx->priv_data;
     HRESULT hr;
@@ -1058,7 +1106,7 @@ static int mf_init(AVCodecContext *avctx)
 
     c->main_subtype = *subtype;
 
-    if ((ret = mf_create(avctx, &c->mft, avctx->codec, use_hw)) < 0)
+    if ((ret = mf_create(&c->symbols, avctx, &c->mft, avctx->codec, use_hw)) < 0)
         return ret;
 
     if ((ret = mf_unlock_async(avctx)) < 0)
@@ -1126,13 +1174,18 @@ static int mf_close(AVCodecContext *avctx)
 {
     MFContext *c = avctx->priv_data;
 
-    if (c->codec_api)
-        ICodecAPI_Release(c->codec_api);
+    if (c->library) {
+        if (c->codec_api)
+            ICodecAPI_Release(c->codec_api);
 
-    if (c->async_events)
-        IMFMediaEventGenerator_Release(c->async_events);
+        if (c->async_events)
+            IMFMediaEventGenerator_Release(c->async_events);
 
-    ff_free_mf(&c->mft);
+        ff_free_mf(&c->symbols, &c->mft);
+
+        dlclose(c->library);
+        c->library = NULL;
+    }
 
     av_frame_free(&c->frame);
 
@@ -1140,6 +1193,19 @@ static int mf_close(AVCodecContext *avctx)
     avctx->extradata_size = 0;
 
     return 0;
+}
+
+static int mf_init(AVCodecContext *avctx)
+{
+    int ret;
+
+    if ((ret = mf_load_library(avctx)) == 0) {
+           if ((ret = mf_init_encoder(avctx)) == 0) {
+                return 0;
+        }
+    }
+    mf_close(avctx);
+    return ret;
 }
 
 #define OFFSET(x) offsetof(MFContext, x)

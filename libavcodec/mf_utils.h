@@ -41,6 +41,15 @@
 
 #include "avcodec.h"
 
+typedef struct MFSymbols {
+    HRESULT (*MFCreateSample) (IMFSample **ppIMFSample);
+    HRESULT (*MFCreateAlignedMemoryBuffer) (DWORD cbMaxLength, DWORD cbAligment,
+                                            IMFMediaBuffer **ppBuffer);
+    HRESULT (*MFStartup) (ULONG Version, DWORD dwFlags);
+    HRESULT (*MFShutdown) (void);
+    HRESULT (*MFCreateMediaType) (IMFMediaType **ppMFType);
+} MFSymbols;
+
 // These functions do exist in mfapi.h, but are only available within
 // __cplusplus ifdefs.
 HRESULT ff_MFGetAttributeSize(IMFAttributes *pattr, REFGUID guid,
@@ -150,7 +159,8 @@ char *ff_hr_str_buf(char *buf, size_t size, HRESULT hr);
 #define FF_VAL_VT_UI4(v) FF_VARIANT_VALUE(VT_UI4, .ulVal = (v))
 #define FF_VAL_VT_BOOL(v) FF_VARIANT_VALUE(VT_BOOL, .boolVal = (v))
 
-IMFSample *ff_create_memory_sample(void *fill_data, size_t size, size_t align);
+IMFSample *ff_create_memory_sample(const MFSymbols *symbols, void *fill_data,
+                                   size_t size, size_t align);
 enum AVSampleFormat ff_media_type_to_sample_fmt(IMFAttributes *type);
 enum AVPixelFormat ff_media_type_to_pix_fmt(IMFAttributes *type);
 const GUID *ff_pix_fmt_to_guid(enum AVPixelFormat pix_fmt);
@@ -160,10 +170,10 @@ char *ff_guid_str_buf(char *buf, size_t buf_size, const GUID *guid);
 void ff_attributes_dump(void *log, IMFAttributes *attrs);
 void ff_media_type_dump(void *log, IMFMediaType *type);
 const CLSID *ff_codec_to_mf_subtype(enum AVCodecID codec);
-int ff_instantiate_mf(void *log, GUID category,
+int ff_instantiate_mf(const MFSymbols *symbols, void *log, GUID category,
                       MFT_REGISTER_TYPE_INFO *in_type,
                       MFT_REGISTER_TYPE_INFO *out_type,
                       int use_hw, IMFTransform **res);
-void ff_free_mf(IMFTransform **mft);
+void ff_free_mf(const MFSymbols *symbols, IMFTransform **mft);
 
 #endif
